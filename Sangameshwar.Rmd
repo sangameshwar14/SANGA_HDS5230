@@ -1,0 +1,105 @@
+---
+title: "Week 6 Assignment"
+author: "Sangameshwar"
+date: "2025-03-02"
+output: html_document
+---
+
+```{r}
+library(data.table)
+library(geosphere)
+library(GA)
+library(purrr)
+library(sf)
+
+## Load the population data
+pop.data <- data.table::fread("Mo_pop_Sim.csv")
+str(pop.data)
+frac <- 0.0001
+small.data <- pop.data[sample(1:nrow(pop.data),
+                               size = round(nrow(pop.data) * frac),
+                               replace = F), ## extract a sample of randomlychosen 1% rows
+                        ]  ## and choose all columns
+
+## Load the FQHC data
+data_path <- 'MO_2018_Federally_Qualified_Health_Center_Locations'
+fqhc.data <- data.table(as.data.frame(st_read(data_path,
+                     'MO_2018_Federally_Qualified_Health_Center_Locations')))
+```
+
+Approach 1
+
+One approach can be to use the average closeness of a location from all of the residences - those locations that are the closest to all of the residences, on average, are the ones that are more easily accessible, and therefore would/should be selected. What is the assumption that is implicit here?
+```{r}
+average_distance <- function(fqhc, pop) {
+  mean(distHaversine(matrix(c(fqhc$Longitude, fqhc$Latitude), ncol = 2), 
+                     matrix(c(pop$long, pop$lat), ncol = 2)))
+}
+
+```
+
+
+Approach 2
+Another approach is to consider locations that have the highest densities of residences within a 30-mile radius (e.g., if location 1 has 59 residences and location 2 has 84 residences in a 30-mile radius, location 1 is to be considered "better" - why? because it can serve more people)
+```{r}
+count_nearby_residences <- function(fqhc, pop, radius = 48280) {
+  sum(distHaversine(matrix(c(fqhc$Longitude, fqhc$Latitude), ncol = 2), 
+                    matrix(c(pop$long, pop$lat), ncol = 2)) < radius)
+}
+```
+
+
+```{r}
+#Compute fitness scores
+fqhc.data[, avg_dist := sapply(1:.N, function(i) average_distance(.SD[i], small.data))]
+fqhc.data[, pop_density := sapply(1:.N, function(i) count_nearby_residences(.SD[i], small.data))]
+
+#Normalize scores and compute final ranking
+fqhc.data[, fitness := (1 / avg_dist) + pop_density]
+
+#Select the top 8 locations
+best_fqhc <- fqhc.data[order(-fitness)][1:8]
+
+#Show the selected locations
+print(best_fqhc[, .(Facility, Address, City, County, State, fitness)])
+```
+
+```{r}
+# Define the fitness function for GA
+fitness_function <- function(indices) {
+  selected_fqhc <- fqhc.data[indices, ]
+  total_fitness <- sum(selected_fqhc$fitness)
+  return(total_fitness)
+}
+
+# Number of locations to select
+num_locations <- 8
+num_fqhc <- nrow(fqhc.data)
+
+# Run Genetic Algorithm
+GA_result <- ga(
+  type = "permutation",
+  fitness = function(x) fitness_function(x),
+  lower = 1, 
+  upper = num_fqhc,
+  popSize = 50,
+  maxiter = 100, 
+  run = 50
+)
+
+# Extract the best solution
+best_indices <- as.integer(GA_result@solution[1, ])
+best_fqhc_ga <- fqhc.data[best_indices, ]
+
+# Show the selected locations from GA
+print(best_fqhc_ga[, .(Facility, Address, City, County, State, fitness)])
+```
+
+
+
+
+The population density approach stands as my chosen method because it enables FQHC selection by counting the homes in a 30-mile radius area. The reason behind this selection is that accessible mental health services form a critical need and density populations benefit from facilities in their vicinity thus delivering services to a greater number of people. A facility situated under the average distance approach ensures better proximity to residents yet may not always achieve maximum coverage of high-demand areas. The density-based location selection method targets areas which exhibit high population numbers since these locations likely need increased mental health service availability.
+
+The primary assumption of this method states that patients will primarily use mental health services within a 30-mile travel distance from their location. The method rests on presuming that transportation impediments exist between patients and services yet most people need to travel great distances for medical care only when absolutely required. Our analysis assumes that every person registered in the population dataset would require mental health services at similar rates when disregarding diverse mental health requirements among different social classes or demographic groups.
+
+In this approach the fitness function uses the count of residences which fall within a 30-mile radius of each FQHC. A basic residence count bases the calculations on the distance threshold. The desired objective is to achieve maximum figures from this metric because a larger nearby resident count demonstrates enhanced access for a larger population segment. We have chosen the eight locations with maximum population density because this ensures location selection in dense residential areas leading to improved accessibility for many people.
